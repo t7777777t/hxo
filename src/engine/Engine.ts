@@ -17,6 +17,12 @@ export interface EngineService {
   readonly shutdown: () => Effect.Effect<void>;
   readonly pollEvents: () => Effect.Effect<boolean>;
   readonly getTicks: () => Effect.Effect<bigint>;
+  readonly renderFrame: (
+    r: number,
+    g: number,
+    b: number,
+    a: number
+  ) => Effect.Effect<void, EngineError>;
 }
 
 export const EngineService = Context.GenericTag<EngineService>("EngineService");
@@ -38,5 +44,14 @@ export const EngineServiceLive = Layer.succeed(
     pollEvents: () => Effect.sync(() => Bridge.pollEvents()),
 
     getTicks: () => Effect.sync(() => Bridge.getTicks()),
+
+    renderFrame: (r, g, b, a) =>
+      Effect.sync(() => Bridge.renderFrame(r, g, b, a)).pipe(
+        Effect.flatMap((result) =>
+          result === 0
+            ? Effect.void
+            : Effect.fail(new EngineError("Render frame failed", result))
+        )
+      ),
   })
 );

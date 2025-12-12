@@ -20,6 +20,9 @@ set(SDL_STATIC OFF CACHE BOOL "" FORCE)
 set(SDL_TEST OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(SDL3)
 
+# Find Vulkan
+find_package(Vulkan REQUIRED)
+
 # Engine shared library
 add_library(engine SHARED
     src/engine.cpp
@@ -29,7 +32,7 @@ target_include_directories(engine PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_link_libraries(engine PRIVATE SDL3::SDL3)
+target_link_libraries(engine PRIVATE SDL3::SDL3 Vulkan::Vulkan)
 
 # Copy SDL3 shared lib next to engine lib for runtime
 add_custom_command(TARGET engine POST_BUILD

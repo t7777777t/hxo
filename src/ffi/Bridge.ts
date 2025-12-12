@@ -52,6 +52,14 @@ export const Bridge = {
     return getLib().symbols.engine_get_ticks();
   },
 
+  renderFrame(r: number, g: number, b: number, a: number): number {
+    return getLib().symbols.engine_render_frame(r, g, b, a);
+  },
+
+  handleResize(): number {
+    return getLib().symbols.engine_handle_resize();
+  },
+
   close(): void {
     if (lib) {
       lib.close();
