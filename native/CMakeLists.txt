@@ -40,3 +40,57 @@ add_custom_command(TARGET engine POST_BUILD
         $<TARGET_FILE:SDL3::SDL3>
         $<TARGET_FILE_DIR:engine>
 )
+
+# Shader compilation - try glslc first, fall back to glslangValidator
+find_program(GLSLC glslc HINTS $ENV{VULKAN_SDK}/bin)
+find_program(GLSLANG glslangValidator)
+
+if(GLSLC)
+    set(SHADER_COMPILER ${GLSLC})
+    set(SHADER_COMPILE_CMD "${GLSLC} <INPUT> -o <OUTPUT>")
+elseif(GLSLANG)
+    set(SHADER_COMPILER ${GLSLANG})
+    set(SHADER_COMPILE_CMD "${GLSLANG} -V <INPUT> -o <OUTPUT>")
+else()
+    message(FATAL_ERROR "No shader compiler found. Install glslang-tools or Vulkan SDK.")
+endif()
+
+set(SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/shaders)
+set(SHADER_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+file(MAKE_DIRECTORY ${SHADER_OUT_DIR})
+
+set(SHADERS
+    ${SHADER_DIR}/triangle.vert
+    ${SHADER_DIR}/triangle.frag
+)
+
+foreach(SHADER ${SHADERS})
+    get_filename_component(SHADER_NAME ${SHADER} NAME)
+    set(SHADER_SPV ${SHADER_OUT_DIR}/${SHADER_NAME}.spv)
+    if(GLSLC)
+        add_custom_command(
+            OUTPUT ${SHADER_SPV}
+            COMMAND ${GLSLC} ${SHADER} -o ${SHADER_SPV}
+            DEPENDS ${SHADER}
+            COMMENT "Compiling ${SHADER_NAME}"
+        )
+    else()
+        add_custom_command(
+            OUTPUT ${SHADER_SPV}
+            COMMAND ${GLSLANG} -V ${SHADER} -o ${SHADER_SPV}
+            DEPENDS ${SHADER}
+            COMMENT "Compiling ${SHADER_NAME}"
+        )
+    endif()
+    list(APPEND SHADER_SPVS ${SHADER_SPV})
+endforeach()
+
+add_custom_target(shaders DEPENDS ${SHADER_SPVS})
+add_dependencies(engine shaders)
+
+# Copy compiled shaders next to engine lib
+add_custom_command(TARGET engine POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${SHADER_OUT_DIR}
+        $<TARGET_FILE_DIR:engine>/shaders
+)

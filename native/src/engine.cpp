@@ -5,6 +5,8 @@
 #include <vector>
 #include <cstring>
 #include <algorithm>
+#include <fstream>
+#include <array>
 
 // Validation layers
 #ifdef NDEBUG
@@ -25,8 +27,43 @@ static constexpr uint32_t DEVICE_EXTENSION_COUNT = 1;
 
 static constexpr int MAX_FRAMES_IN_FLIGHT = 2;
 
+// Vertex structure
+struct Vertex {
+    float pos[2];
+    float color[3];
+
+    static VkVertexInputBindingDescription getBindingDescription() {
+        VkVertexInputBindingDescription desc = {};
+        desc.binding = 0;
+        desc.stride = sizeof(Vertex);
+        desc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        return desc;
+    }
+
+    static std::array<VkVertexInputAttributeDescription, 2> getAttributeDescriptions() {
+        std::array<VkVertexInputAttributeDescription, 2> attrs = {};
+        attrs[0].binding = 0;
+        attrs[0].location = 0;
+        attrs[0].format = VK_FORMAT_R32G32_SFLOAT;
+        attrs[0].offset = offsetof(Vertex, pos);
+        attrs[1].binding = 0;
+        attrs[1].location = 1;
+        attrs[1].format = VK_FORMAT_R32G32B32_SFLOAT;
+        attrs[1].offset = offsetof(Vertex, color);
+        return attrs;
+    }
+};
+
+// Hardcoded triangle vertices
+static const Vertex TRIANGLE_VERTICES[] = {
+    {{ 0.0f, -0.5f}, {1.0f, 0.0f, 0.0f}},  // Top - red
+    {{ 0.5f,  0.5f}, {0.0f, 1.0f, 0.0f}},  // Bottom right - green
+    {{-0.5f,  0.5f}, {0.0f, 0.0f, 1.0f}},  // Bottom left - blue
+};
+
 // Global state
 static SDL_Window* g_window = nullptr;
+static char g_base_path[512] = {0};
 static VkInstance g_instance = VK_NULL_HANDLE;
 static VkDebugUtilsMessengerEXT g_debug_messenger = VK_NULL_HANDLE;
 static VkSurfaceKHR g_surface = VK_NULL_HANDLE;
@@ -48,6 +85,10 @@ static std::vector<VkImageView> g_swapchain_image_views;
 static VkRenderPass g_render_pass = VK_NULL_HANDLE;
 static std::vector<VkFramebuffer> g_framebuffers;
 
+// Graphics pipeline
+static VkPipelineLayout g_pipeline_layout = VK_NULL_HANDLE;
+static VkPipeline g_graphics_pipeline = VK_NULL_HANDLE;
+
 // Command pool and buffers
 static VkCommandPool g_command_pool = VK_NULL_HANDLE;
 static std::vector<VkCommandBuffer> g_command_buffers;
@@ -57,6 +98,9 @@ static std::vector<VkSemaphore> g_image_available_semaphores;
 static std::vector<VkSemaphore> g_render_finished_semaphores;
 static std::vector<VkFence> g_in_flight_fences;
 static uint32_t g_current_frame = 0;
+
+// Rendering mode
+static bool g_draw_triangle = false;
 
 // Debug callback
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
@@ -69,6 +113,51 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
         SDL_Log("Vulkan: %s", callback_data->pMessage);
     }
     return VK_FALSE;
+}
+
+static std::vector<char> read_file(const char* filename) {
+    // Try multiple paths to find shaders
+    const char* paths[] = {
+        g_base_path,
+        "native/build",
+        "./native/build",
+        "../native/build",
+        "."
+    };
+
+    for (const char* base : paths) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/shaders/%s", base, filename);
+
+        std::ifstream file(path, std::ios::ate | std::ios::binary);
+        if (file.is_open()) {
+            size_t size = static_cast<size_t>(file.tellg());
+            std::vector<char> buffer(size);
+            file.seekg(0);
+            file.read(buffer.data(), size);
+            SDL_Log("Loaded shader: %s", path);
+            return buffer;
+        }
+    }
+
+    SDL_Log("Failed to find shader file: %s", filename);
+    return {};
+}
+
+static VkShaderModule create_shader_module(const std::vector<char>& code) {
+    if (code.empty()) return VK_NULL_HANDLE;
+
+    VkShaderModuleCreateInfo create_info = {};
+    create_info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = code.size();
+    create_info.pCode = reinterpret_cast<const uint32_t*>(code.data());
+
+    VkShaderModule module;
+    if (vkCreateShaderModule(g_device, &create_info, nullptr, &module) != VK_SUCCESS) {
+        SDL_Log("Failed to create shader module");
+        return VK_NULL_HANDLE;
+    }
+    return module;
 }
 
 static bool check_validation_layer_support() {
@@ -104,7 +193,6 @@ static int create_instance() {
     app_info.engineVersion = VK_MAKE_VERSION(0, 1, 0);
     app_info.apiVersion = VK_API_VERSION_1_2;
 
-    // Get SDL required extensions
     uint32_t sdl_ext_count = 0;
     const char* const* sdl_extensions = SDL_Vulkan_GetInstanceExtensions(&sdl_ext_count);
 
@@ -142,7 +230,6 @@ static int create_instance() {
         return 2;
     }
 
-    // Setup debug messenger
     if (ENABLE_VALIDATION) {
         auto func = (PFN_vkCreateDebugUtilsMessengerEXT)
             vkGetInstanceProcAddr(g_instance, "vkCreateDebugUtilsMessengerEXT");
@@ -225,7 +312,6 @@ static int pick_physical_device() {
         if (!indices.complete()) continue;
         if (!check_device_extension_support(device)) continue;
 
-        // Check swapchain support
         uint32_t format_count, mode_count;
         vkGetPhysicalDeviceSurfaceFormatsKHR(device, g_surface, &format_count, nullptr);
         vkGetPhysicalDeviceSurfacePresentModesKHR(device, g_surface, &mode_count, nullptr);
@@ -249,7 +335,6 @@ static int create_logical_device() {
     std::vector<VkDeviceQueueCreateInfo> queue_create_infos;
     float priority = 1.0f;
 
-    // Unique queue families
     std::vector<uint32_t> unique_families = {g_graphics_family};
     if (g_present_family != g_graphics_family) {
         unique_families.push_back(g_present_family);
@@ -378,7 +463,6 @@ static int create_swapchain() {
     g_swapchain_images.resize(image_count);
     vkGetSwapchainImagesKHR(g_device, g_swapchain, &image_count, g_swapchain_images.data());
 
-    // Create image views
     g_swapchain_image_views.resize(image_count);
     for (size_t i = 0; i < image_count; i++) {
         VkImageViewCreateInfo view_info = {};
@@ -446,6 +530,129 @@ static int create_render_pass() {
         SDL_Log("Failed to create render pass");
         return 1;
     }
+    return 0;
+}
+
+static int create_graphics_pipeline() {
+    auto vert_code = read_file("triangle.vert.spv");
+    auto frag_code = read_file("triangle.frag.spv");
+
+    if (vert_code.empty() || frag_code.empty()) {
+        SDL_Log("Failed to load shaders");
+        return 1;
+    }
+
+    VkShaderModule vert_module = create_shader_module(vert_code);
+    VkShaderModule frag_module = create_shader_module(frag_code);
+
+    if (!vert_module || !frag_module) {
+        return 2;
+    }
+
+    VkPipelineShaderStageCreateInfo vert_stage = {};
+    vert_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    vert_stage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+    vert_stage.module = vert_module;
+    vert_stage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo frag_stage = {};
+    frag_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    frag_stage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    frag_stage.module = frag_module;
+    frag_stage.pName = "main";
+
+    VkPipelineShaderStageCreateInfo stages[] = {vert_stage, frag_stage};
+
+    // Vertex input - empty, using hardcoded vertices in shader
+    VkPipelineVertexInputStateCreateInfo vertex_input = {};
+    vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    vertex_input.vertexBindingDescriptionCount = 0;
+    vertex_input.vertexAttributeDescriptionCount = 0;
+
+    VkPipelineInputAssemblyStateCreateInfo input_assembly = {};
+    input_assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    input_assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    input_assembly.primitiveRestartEnable = VK_FALSE;
+
+    VkPipelineViewportStateCreateInfo viewport_state = {};
+    viewport_state.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport_state.viewportCount = 1;
+    viewport_state.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer = {};
+    rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    rasterizer.depthClampEnable = VK_FALSE;
+    rasterizer.rasterizerDiscardEnable = VK_FALSE;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.lineWidth = 1.0f;
+    rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+    rasterizer.depthBiasEnable = VK_FALSE;
+
+    VkPipelineMultisampleStateCreateInfo multisampling = {};
+    multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisampling.sampleShadingEnable = VK_FALSE;
+    multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState color_blend_attachment = {};
+    color_blend_attachment.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    color_blend_attachment.blendEnable = VK_FALSE;
+
+    VkPipelineColorBlendStateCreateInfo color_blending = {};
+    color_blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    color_blending.logicOpEnable = VK_FALSE;
+    color_blending.attachmentCount = 1;
+    color_blending.pAttachments = &color_blend_attachment;
+
+    std::vector<VkDynamicState> dynamic_states = {
+        VK_DYNAMIC_STATE_VIEWPORT,
+        VK_DYNAMIC_STATE_SCISSOR
+    };
+
+    VkPipelineDynamicStateCreateInfo dynamic_state = {};
+    dynamic_state.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic_state.dynamicStateCount = static_cast<uint32_t>(dynamic_states.size());
+    dynamic_state.pDynamicStates = dynamic_states.data();
+
+    VkPipelineLayoutCreateInfo layout_info = {};
+    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+
+    if (vkCreatePipelineLayout(g_device, &layout_info, nullptr, &g_pipeline_layout) != VK_SUCCESS) {
+        SDL_Log("Failed to create pipeline layout");
+        vkDestroyShaderModule(g_device, vert_module, nullptr);
+        vkDestroyShaderModule(g_device, frag_module, nullptr);
+        return 3;
+    }
+
+    VkGraphicsPipelineCreateInfo pipeline_info = {};
+    pipeline_info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    pipeline_info.stageCount = 2;
+    pipeline_info.pStages = stages;
+    pipeline_info.pVertexInputState = &vertex_input;
+    pipeline_info.pInputAssemblyState = &input_assembly;
+    pipeline_info.pViewportState = &viewport_state;
+    pipeline_info.pRasterizationState = &rasterizer;
+    pipeline_info.pMultisampleState = &multisampling;
+    pipeline_info.pColorBlendState = &color_blending;
+    pipeline_info.pDynamicState = &dynamic_state;
+    pipeline_info.layout = g_pipeline_layout;
+    pipeline_info.renderPass = g_render_pass;
+    pipeline_info.subpass = 0;
+
+    if (vkCreateGraphicsPipelines(g_device, VK_NULL_HANDLE, 1, &pipeline_info, nullptr, &g_graphics_pipeline) != VK_SUCCESS) {
+        SDL_Log("Failed to create graphics pipeline");
+        vkDestroyShaderModule(g_device, vert_module, nullptr);
+        vkDestroyShaderModule(g_device, frag_module, nullptr);
+        return 4;
+    }
+
+    vkDestroyShaderModule(g_device, vert_module, nullptr);
+    vkDestroyShaderModule(g_device, frag_module, nullptr);
+
+    g_draw_triangle = true;
+    SDL_Log("Graphics pipeline created successfully");
     return 0;
 }
 
@@ -563,6 +770,14 @@ int engine_init(const char* title, int width, int height) {
         return 1;
     }
 
+    // Get base path for shader loading
+    const char* base = SDL_GetBasePath();
+    if (base) {
+        strncpy(g_base_path, base, sizeof(g_base_path) - 1);
+    } else {
+        strcpy(g_base_path, ".");
+    }
+
     g_window = SDL_CreateWindow(title, width, height,
         SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!g_window) {
@@ -577,10 +792,11 @@ int engine_init(const char* title, int width, int height) {
     if (create_logical_device() != 0) return 6;
     if (create_swapchain() != 0) return 7;
     if (create_render_pass() != 0) return 8;
-    if (create_framebuffers() != 0) return 9;
-    if (create_command_pool() != 0) return 10;
-    if (create_command_buffers() != 0) return 11;
-    if (create_sync_objects() != 0) return 12;
+    if (create_graphics_pipeline() != 0) return 9;
+    if (create_framebuffers() != 0) return 10;
+    if (create_command_pool() != 0) return 11;
+    if (create_command_buffers() != 0) return 12;
+    if (create_sync_objects() != 0) return 13;
 
     SDL_Log("Engine initialized with Vulkan: %s (%dx%d)", title, width, height);
     return 0;
@@ -604,6 +820,8 @@ void engine_shutdown(void) {
 
     cleanup_swapchain();
 
+    if (g_graphics_pipeline) vkDestroyPipeline(g_device, g_graphics_pipeline, nullptr);
+    if (g_pipeline_layout) vkDestroyPipelineLayout(g_device, g_pipeline_layout, nullptr);
     if (g_render_pass) vkDestroyRenderPass(g_device, g_render_pass, nullptr);
     if (g_device) vkDestroyDevice(g_device, nullptr);
 
@@ -674,6 +892,28 @@ int engine_render_frame(float r, float g, float b, float a) {
     rp_info.pClearValues = &clear_value;
 
     vkCmdBeginRenderPass(cmd, &rp_info, VK_SUBPASS_CONTENTS_INLINE);
+
+    if (g_draw_triangle && g_graphics_pipeline) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g_graphics_pipeline);
+
+        VkViewport viewport = {};
+        viewport.x = 0.0f;
+        viewport.y = 0.0f;
+        viewport.width = static_cast<float>(g_swapchain_extent.width);
+        viewport.height = static_cast<float>(g_swapchain_extent.height);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+        VkRect2D scissor = {};
+        scissor.offset = {0, 0};
+        scissor.extent = g_swapchain_extent;
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+        // Draw triangle with hardcoded vertices in shader
+        vkCmdDraw(cmd, 3, 1, 0, 0);
+    }
+
     vkCmdEndRenderPass(cmd);
     vkEndCommandBuffer(cmd);
 
