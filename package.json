@@ -1,0 +1,17 @@
+{
+  "name": "hxo",
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "build:native": "./scripts/build-native.sh",
+    "dev": "./scripts/dev.sh",
+    "example:ffi": "bun run examples/hello-ffi/main.ts"
+  },
+  "dependencies": {
+    "effect": "^3.11.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}
